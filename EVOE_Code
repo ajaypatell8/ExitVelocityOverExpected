@@ -1,0 +1,295 @@
+library(tidyverse)
+library(xgboost)
+library(DiagrammeR)
+library(vip)
+library(rlang)
+library(dials)
+library(Ckmeans.1d.dp)
+library(gt)
+library(gtExtras)
+library(ggplot2)
+
+savantData <- read_csv("SavantData.csv")
+
+#sanity/structure check
+View(savantData)
+nrow(savantData)
+
+#change date format
+savantData$game_date <- as.Date(savantData$game_date, "%Y/%m/%d")
+
+#get player info
+mlbplayerids <- baseballr::get_chadwick_lu()
+
+#add names to savant data
+savantIDS <- mlbplayerids %>% 
+  select(key_mlbam, name_first, name_last) %>% 
+  mutate(name = paste(name_first, name_last, sep = " ")) %>% 
+  filter(!is.na(key_mlbam))
+ 
+#get bbes
+bbe_data <- savantData %>% 
+  filter(type == "X")
+
+#join names to batted balls
+bbe_data <- left_join(bbe_data, savantIDS, by = c("batter" = "key_mlbam"))
+
+#get hitters names
+bbe_data <- bbe_data %>% 
+  rename(batter_first_name = name_first,
+         batter_last_name = name_last,
+         batter_name = name)
+
+bbe_data <- left_join(bbe_data, savantIDS, by = c("pitcher" = "key_mlbam"))
+
+#get pitcher names
+bbe_data <- bbe_data %>% 
+  rename(pitcher_first_name = name_first,
+         pitcher_last_name = name_last,
+         pitcher_name = name)
+
+#check for NAs
+sum(is.na(bbe_data$launch_speed))
+sum(is.na(bbe_data$pfx_x))
+sum(is.na(bbe_data$release_extension))
+
+#remove NAs
+test_bbe <- bbe_data %>% 
+  filter(!is.na(launch_speed))
+
+#ev leaders
+test_bbe %>% 
+  group_by(batter, batter_name) %>% 
+  summarise(mean_ev = mean(launch_speed), bbe = n()) %>% 
+  filter(bbe >= 500) %>% 
+  View()
+
+#sanity check lmao
+mean(test_bbe$launch_speed)
+
+#ev distribution
+test_bbe %>% 
+  ggplot(aes(x = launch_speed)) +
+  geom_histogram(alpha = 0.4, fill = "#145DA0") +
+  theme_ajay() +
+  labs(
+    x = "Exit Velocity",
+    y = "Count",
+    title = "Exit Velocity Distribution",
+    subtitle = "2016 On | Dashed Line Is Average EV",
+    caption = "Data: BaseballSavant via baseballR | @ajaypatell8"
+  ) +
+  scale_x_continuous(limits = c(0, 125)) +
+  geom_vline(xintercept = 88.06, linetype = "dashed", color = "#145DA0", alpha = 0.8)
+
+#filtering out no nulls | decided against this
+test_bbe %>% 
+  filter(game_year < 2020) %>% 
+  filter(launch_speed == 90.2, launch_angle == -13) %>% 
+  View()
+
+nrow(test_bbe)
+
+#add a count variable
+final_bbe_data <- test_bbe %>% 
+  mutate(count = balls - strikes)
+
+#remove NAs
+final_bbe_data <- final_bbe_data %>% 
+  filter(!is.na(release_pos_x), !is.na(release_pos_z),
+         !is.na(count), !is.na(pfx_x), !is.na(pfx_z), !is.na(plate_x), !is.na(plate_z),
+         !is.na(pitch_number), !is.na(release_extension)) 
+
+#still sane
+nrow(final_bbe_data)
+View(final_bbe_data)
+
+#check few metrics
+sd(final_bbe_data$launch_speed)
+quantile(final_bbe_data$launch_speed,  probs = c(.25, .5, .75))
+
+#final df ready for testing
+str(final_bbe_data)
+
+#select wanted vars
+ev_data <- final_bbe_data %>% 
+  select(game_date, home_team, away_team, game_year, batter_name, batter, pitcher_name, pitcher,
+         inning, inning_topbot, description, pitch_type, pitch_name, events, zone, release_speed, release_pos_x, release_pos_z,
+         count, pfx_x, pfx_z, plate_x, plate_z, release_extension,
+         pitch_number, launch_speed, launch_angle, bb_type, if_fielding_alignment)
+
+View(ev_data)
+nrow(ev_data)
+
+#remove bunts
+ev_data <- ev_data %>% 
+  filter(!str_detect(events, "bunt"))
+
+#add pitch groups
+ev_data <- ev_data %>% 
+  mutate(pitch_group = 
+           case_when(
+             pitch_type == "FF" ~ "fastball",
+             pitch_type == "FA" ~ "fastball",
+             pitch_type == "SI" ~ "fastball",
+             pitch_type == "SL" ~ "breaking ball",
+             pitch_type == "KC" ~ "breaking ball",
+             pitch_type == "CU" ~ "breaking ball",
+             pitch_type == "EP" ~ "breaking ball",
+             pitch_type == "FC" ~ "breaking ball",
+             pitch_type == "SC" ~ "breaking ball",
+             pitch_type == "CH" ~ "offspeed",
+             pitch_type == "FS" ~ "offspeed",
+             TRUE ~ "other"
+           ))
+
+#add a playid
+ev_data <- ev_data %>% 
+  mutate(playid = row_number())
+
+#add a shift variable
+ev_data <- ev_data %>% 
+  mutate(shift = if_else(str_detect(if_fielding_alignment, "shift"), 1, 0))
+
+View(ev_data)
+
+#model inputs
+ev_data_model <- ev_data %>% 
+  select(launch_speed, release_speed, release_pos_x, release_pos_z, count, pfx_x, pfx_z, plate_x, plate_z, 
+         release_extension, pitch_number, playid)
+
+#get training data
+sample <- sample(c(TRUE, FALSE), nrow(ev_data_model), replace=TRUE, prob=c(0.8,0.2))
+
+#make them matrices for xgboost input
+train <- as.matrix(ev_data_model[sample, ])
+test <- as.matrix(ev_data_model[!sample, ])
+
+dim(train)
+colnames(train)
+View(train)
+
+#train model (TEST RUN 1 TO FIND BEST PARAMETERS)
+evoe_model <-
+  xgboost(
+    data = train[, 2:11],
+    label = train[, 1],
+    nrounds = 1000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 3,
+    max_depth = 6,
+    eta = .3, 
+    gamma = 0,
+    colsample_bytree = 1
+  )  
+
+#predict values
+predict <- predict(evoe_model, test[, 2:11])
+
+#join to test data
+model_results <- predict %>% 
+  as_tibble() %>% 
+  bind_cols(test)
+  
+View(model_results)
+
+#accuracy check
+mse = mean((model_results$launch_speed - model_results$value)^2)
+mae = caret::MAE(model_results$launch_speed, model_results$value)
+rmse = caret::RMSE(model_results$launch_speed, model_results$value)
+
+cat("MSE: ", mse, "MAE: ", mae, " RMSE: ", rmse)
+
+#correlation
+(cor(model_results$launch_speed, model_results$value))^2
+
+#variable importance plot
+importance <- xgboost::xgb.importance(
+  feature_names = colnames(evoe_model),
+  model = evoe_model
+)
+xgboost::xgb.ggplot.importance(importance_matrix = importance)
+
+
+#find best parameters
+hyper_grid <- expand.grid(max_depth = seq(3, 5, 1),
+                          eta = seq(.2, .3, .01))
+xgb_train_rmse <- NULL
+xgb_test_rmse <- NULL
+
+for (j in 1:nrow(hyper_grid)) {
+  set.seed(123)
+  m_xgb_untuned <- xgb.cv(
+    data = train[, 2:11],
+    label = train[, 1],
+    nrounds = 1000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 3,
+    nfold = 5,
+    max_depth = hyper_grid$max_depth[j],
+    eta = hyper_grid$eta[j]
+  )
+  
+  xgb_train_rmse[j] <- m_xgb_untuned$evaluation_log$train_rmse_mean[m_xgb_untuned$best_iteration]
+  xgb_test_rmse[j] <- m_xgb_untuned$evaluation_log$test_rmse_mean[m_xgb_untuned$best_iteration]
+  
+  cat(j, "\n")
+}
+
+#ideal hyperparameters
+hyper_grid[which.min(xgb_test_rmse), ]
+
+#actual model run using best hyperparameters
+evoe_model_final <-
+  xgboost(
+    data = ev_data_model[, 2:11],
+    label = ev_data_model[, 1],
+    nrounds = 1000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 3,
+    max_depth = 5, #ideal depth
+    eta = .24, 
+    gamma = 0,
+    colsample_bytree = 1,
+    print_every_n = 50
+  )  
+
+#predict values
+predict <- predict(evoe_model_final, ev_data_model[, 2:11])
+
+#join to test data
+model_results <- predict %>% 
+  as_tibble() %>% 
+  bind_cols(ev_data_model)
+
+View(model_results)
+
+#rename column
+model_results <- model_results %>% 
+  rename(predicted_ev = value, ev = launch_speed)
+
+#sanity!
+nrow(ev_data)
+nrow(model_results)
+
+#final df
+evoe_final <- left_join(ev_data, model_results, by = c("playid", "pitch_number", "release_extension", "plate_z",
+                                                       "plate_x", "pfx_x", "pfx_z", "count", "release_pos_z", "release_pos_x",
+                                                       "release_speed", "launch_speed" = "ev"))
+
+#add teams
+evoe_final <- evoe_final %>% 
+  mutate(team = if_else(inning_topbot == "Top", away_team, home_team),
+         pitching_team = if_else(inning_topbot == "Top", home_team, away_team))
+
+#add evoe
+evoe_final <- evoe_final %>% 
+  mutate(evoe = launch_speed - predicted_ev)
+
+#check for dups
+evoe_final <- evoe_final %>% 
+  unique()
+  
+#store to machine
+write_csv(evoe_final, "evoe_final.csv")
+
