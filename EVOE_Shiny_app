@@ -1,0 +1,577 @@
+library(shiny)
+library(shinyWidgets)
+library(bslib)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(stringr)
+library(tidyverse)
+library(gt)
+library(reactable)
+library(gtExtras)
+
+
+evoe_df <- read_csv("evoe_final.csv")
+mlb_headshots <- read_csv("mlb_headshots.csv")
+mlbteams <- read_csv("mlbteams.csv")
+
+# Define UI for application that draws a histogram
+ui <- fluidPage(
+  theme = bslib::bs_theme(version = "5", bootswatch = "minty"),
+  titlePanel("Exit Velocity Over Expected"),
+  
+  mainPanel(
+    navbarPage("By Ajay Patel",
+               tabPanel("All Hitters",
+                        column(width = 3, align = "center",
+                               sliderInput(inputId = "bbe", label = "Minimum BBE",
+                                           value = 50, max = 500, min = 0)),
+                        reactableOutput("hitters_table")),
+               tabPanel("All Pitchers",
+                        column(width = 3, align = "center",
+                               sliderInput(inputId = "bbe2", label = "Minimum BBE",
+                                           value = 50, max = 500, min = 0)),
+                        reactableOutput("pitchers_table")),
+               tabPanel("Batter Cards",
+                        fluidRow(
+                          column(width = 3, align = "center",
+                                 selectizeInput(inputId = "hitter", label = "Batter Name", c(sort(unique(as.character(evoe_df$batter_name)))),
+                                             #maxOptions to allow for all players to be shown
+                                                selected = "Aaron Judge", options = list(maxOptions = 3000))
+                        ),
+                        mainPanel(
+                          gt_output(outputId = "hitter_card")
+                        ))),
+               tabPanel("Pitcher Cards",
+                        fluidRow(
+                          column(width = 3, align = "center",
+                               selectizeInput(inputId = "pitcher1", label = "Pitcher Name", c(sort(unique(as.character(evoe_df$pitcher_name)))),
+                                              #maxOptions to allow for all players to be shown
+                                              selected = "Max Scherzer", options = list(maxOptions = 3000))
+                        ),
+                        mainPanel(
+                          gt_output(outputId = "pitcher_card")
+                        ))),        
+               tabPanel("Hitters By Pitch Type",
+                        column(width = 3, align = "center",
+                               sliderInput(inputId = "bbe3", label = "Minimum BBE",
+                                           value = 25, max = 250, min = 0)),
+                        reactableOutput("hit_type_table")),
+               tabPanel("Pitchers By Pitch Type",
+                        column(width = 3, align = "center",
+                               sliderInput(inputId = "bbe4", label = "Minimum BBE",
+                                           value = 25, max = 250, min = 0)),
+                        reactableOutput("pitch_type_table")),
+               tabPanel("Hitter Strike Zone Plots",
+                        fluidRow(
+                          column(width = 3, align = "center",
+                               selectizeInput(inputId = "hitter4", label = "Batter Name", c(sort(unique(as.character(evoe_df$batter_name)))),
+                                              #maxOptions to allow for all players to be shown
+                                              selected = "Aaron Judge", options = list(maxOptions = 3000)),
+                               selectInput(inputId = "pitch", label = "Pitch Type",
+                                           choices = c("All Pitches", "Fastballs", "Breaking Balls", "Offspeed", "Other"),
+                                           selected = "All Pitches"),
+                               sliderInput(inputId = "years", label = "Year Range", value = c(2016, 2022), min = 2016, 
+                                           max = 2022, sep = "")),
+                        mainPanel(
+                          plotOutput(outputId = "sz_graph", width = 1100, height = 733)
+                        ))), #look to add pitch type to these and reduce redundacy (or leave it)
+               tabPanel("Pitcher Strike Zone Plots",
+                        fluidRow(
+                          column(width = 3, align = "center",
+                                 selectizeInput(inputId = "pitcher4", label = "Pitcher Name", c(sort(unique(as.character(evoe_df$pitcher_name)))),
+                                                #maxOptions to allow for all players to be shown
+                                                selected = "Max Scherzer", options = list(maxOptions = 3000)),
+                                 selectInput(inputId = "pitch1", label = "Pitch Type",
+                                             choices = c("All Pitches", "Fastballs", "Breaking Balls", "Offspeed", "Other"),
+                                             selected = "All Pitches"),
+                                 sliderInput(inputId = "years1", label = "Year Range", value = c(2016, 2022), min = 2016, 
+                                             max = 2022, sep = "")),
+                          mainPanel(
+                            plotOutput(outputId = "sz_graph_pitch", width = 1100, height = 733)),
+               
+                 )),
+               tabPanel("Glossary",
+                        mainPanel(
+                          strong("Inputs:"),
+                          p("Minimum BBE: Choose a minimum number of batted ball events to analyze results"),
+                          p("Batter Name: Choose your desired hitter"),
+                          p("Pitcher Name: Choose your desired pitcher"),
+                          p("Pitch Type: Choose the grouping of pitches you want to analyze"),
+                          p("Year Range: Choose the years you want to analyze, inclusive"),
+                          br(),
+                          strong("Metrics:"),
+                          p("Predicted Exit Velocity: Based on pitch characteristics and game-state factors, what is the expected
+                            exit velocity of the batter's contact"),
+                          p("EVOE: exit velocity over expected. simply, actual exit velocity minus predicted exit velocity"),
+                          p("For batters, higher EVOE values are better, showing they hit the ball harder than expected. And
+                            for pitchers, lower EVOE values are better, showing they allow weaker contact than expected."),
+                          br(),
+                          strong("Notes:"),
+                          p("All data is courtesy of BaseballR, BaseballSavant, and my own model"),
+                          p("Note that for the tables and player cards, exit velocity, predicted exit velocity, and EVOE
+                            are all averages"),
+                          p("For further reading on EVOE, check out my account on Medium @ajaypatell8, thanks for visiting!")
+                        ))) 
+              )
+            
+)
+
+# Define server logic required to draw a histogram
+server <- function(input, output) {
+
+  output$hitter_card <- render_gt({
+    
+    evoe_batters <- evoe_df %>% 
+      group_by(batter, batter_name, team, game_year) %>% 
+      summarise(ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe_1 = mean(evoe), bbe = n(), max_evoe = max(evoe))
+    
+    vlad <- evoe_batters %>% 
+      filter(batter_name == input$hitter) %>% 
+      ungroup()
+    
+    batter_name <- unique(vlad$batter_name)
+    
+    vlad <- left_join(vlad, mlbteams, by = c("team" = "team_primary_abbr")) 
+    
+    #trim
+    vlad <- vlad %>% 
+      select(batter, batter_name, team, game_year, ev, predicted_ev, evoe_1, max_evoe, bbe, team_logo_espn)
+    
+    #get headshot
+    img_url <- mlb_headshots %>% 
+      filter(savant_id == unique(vlad$batter)) %>% 
+      select(espn_headshot) %>% 
+      as.character() %>% 
+      as.vector()
+    
+    vlad %>% 
+      select(-batter, -batter_name) %>% 
+      gt() %>% 
+      gt_theme_espn() %>% 
+      cols_align(align = "center") %>% 
+      tab_header(title = add_text_img(paste(batter_name, "'s EVOE", sep = ""), 
+                                      url = img_url, left = TRUE)) %>% 
+      gt_hulk_col_numeric(c("ev", "predicted_ev", "evoe_1", "bbe", "max_evoe")) %>% 
+      gt_img_rows(team_logo_espn) %>% 
+      cols_move(
+        columns = team_logo_espn, 
+        after = "team"
+      ) %>% 
+      cols_align(
+        align = "center",
+        columns = everything()
+      )  %>% 
+      opt_align_table_header(align = "center") %>% 
+      cols_label(team_logo_espn = "",
+                 ev = "AVG Exit Velocity",
+                 predicted_ev = "Predicted EV",
+                 game_year = "Season",
+                 evoe_1 = "EVOE",
+                 max_evoe = "Max EVOE") %>% 
+      tab_source_note("Data: BaseballSavant via baseballR & @ajaypatell8") %>% 
+      cols_move(
+        columns = bbe,
+        after = "game_year"
+      ) %>% 
+      fmt_number(columns = c("ev", "predicted_ev", "evoe_1", "max_evoe")) %>% 
+      tab_options(
+        container.width = 1000,
+        container.height = 1000
+      ) %>% 
+      cols_width(
+        ev ~ px(100)
+      )
+    
+  })
+  
+  output$pitcher_card <-  render_gt({
+    
+    evoe_pitchers <- evoe_df %>% 
+      group_by(pitcher, pitcher_name, pitching_team, game_year) %>% 
+      summarise(ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe = mean(evoe), bbe = n())
+    
+    max <- evoe_pitchers %>% 
+      filter(pitcher_name == input$pitcher1) %>% 
+      ungroup()
+    
+    pitcher_name <- unique(max$pitcher_name)
+    
+    max <- left_join(max, mlbteams, by = c("pitching_team" = "team_primary_abbr")) 
+    
+    #trim
+    max <- max %>% 
+      select(pitcher, pitcher_name, pitching_team, game_year, ev, predicted_ev, evoe, bbe, team_logo_espn) %>% 
+      arrange(-desc(game_year))
+    
+    #get headshot
+    img_url <- mlb_headshots %>% 
+      filter(savant_id == unique(max$pitcher)) %>% 
+      select(espn_headshot) %>% 
+      as.character() %>% 
+      as.vector()
+    
+    max %>% 
+      select(-pitcher, -pitcher_name) %>% 
+      gt() %>% 
+      gt_theme_espn() %>% 
+      cols_align(align = "center") %>% 
+      tab_header(title = add_text_img(paste(pitcher_name, "'s EVOE", sep = ""), 
+                                      url = img_url, left = TRUE)) %>% 
+      gt_hulk_col_numeric(c("ev", "predicted_ev", "evoe", "bbe"), reverse = TRUE) %>% 
+      gt_img_rows(team_logo_espn) %>% 
+      cols_move(
+        columns = team_logo_espn, 
+        after = "pitching_team"
+      ) %>% 
+      cols_align(
+        align = "center",
+        columns = everything()
+      )  %>% 
+      opt_align_table_header(align = "center") %>% 
+      cols_label(team_logo_espn = "",
+                 pitching_team = "Team",
+                 ev = "AVG Exit Velocity Allowed",
+                 predicted_ev = "Predicted EV",
+                 game_year = "Season") %>% 
+      tab_source_note("Data: BaseballSavant via baseballR & @ajaypatell8") %>% 
+      cols_move(
+        columns = bbe,
+        after = "game_year"
+      ) %>% 
+      fmt_number(columns = c("ev", "predicted_ev", "evoe")) %>% 
+      tab_options(
+        container.width = 1000,
+        container.height = 1000
+      ) %>% 
+      cols_width(
+        ev ~ px(100)
+      )
+    
+  })
+  
+  output$hitters_table <- renderReactable({
+    
+    evoe_batters_2 <- evoe_df %>% 
+      group_by(batter_name, team, game_year) %>% 
+      summarise(ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe_1 = mean(evoe), bbe = n(), max_evoe = max(evoe)) %>% 
+      filter(bbe >= input$bbe) %>% 
+      select(batter_name, team, game_year, bbe, ev, predicted_ev, evoe_1, max_evoe) %>% 
+      arrange(desc(evoe_1))
+
+    hulk <- function(x) rgb(colorRamp(c("#7fb7d7", "#ffffbf", "#fc8d59"))(x), maxColorValue = 255)
+    
+    
+    reactable(evoe_batters_2, filterable = TRUE, searchable = TRUE, showPageSizeOptions = TRUE, pageSizeOptions = c(10, 25, 50, 100),
+              defaultPageSize = 10,
+              columns = list(
+                ev = colDef(format = colFormat(digits = 2), name = "AVG Exit Velocity", align = "center"),
+                predicted_ev = colDef(format = colFormat(digits = 2), name = "Predicted Exit Velocity", align = "center"),
+                evoe_1 = colDef(format = colFormat(digits = 2), name = "EVOE", align = "center",
+                                style = function(value) {
+                                  normalized <- (value - min(evoe_batters_2$evoe_1)) / (max(evoe_batters_2$evoe_1) - min(evoe_batters_2$evoe_1))
+                                  color <- hulk(normalized)
+                                  list(background = color)
+                                }),
+                batter_name = colDef(name = "Batter", align = "center"),
+                game_year = colDef(name = "Season", align = "center"),
+                bbe = colDef(name = "BBE", align = "center"),
+                team = colDef(name = "Team", align = "center"),
+                max_evoe = colDef(format = colFormat(digits = 2), name = "MAX EVOE", align = "center",
+                                  style = function(value) {
+                                    normalized <- (value - min(evoe_batters_2$max_evoe)) / (max(evoe_batters_2$max_evoe) - min(evoe_batters_2$max_evoe))
+                                    color <- hulk(normalized)
+                                    list(background = color)
+                                  })
+              ))
+  })
+  
+  output$pitchers_table <- renderReactable({
+    
+    evoe_pitchers_2 <- evoe_df %>% 
+      group_by(pitcher_name, pitching_team, game_year) %>% 
+      summarise(bbe = n(), ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe = mean(evoe)) %>% 
+      filter(bbe >= input$bbe2) %>% 
+      arrange(-desc(evoe))
+    
+    hulk <- function(x) rgb(colorRamp(c("#fc8d59", "#ffffbf", "#7fb7d7"))(x), maxColorValue = 255)
+    
+    
+    reactable(evoe_pitchers_2, filterable = TRUE, searchable = TRUE, showPageSizeOptions = TRUE, pageSizeOptions = c(10, 25, 50, 100),
+              defaultPageSize = 10,
+              columns = list(
+                ev = colDef(format = colFormat(digits = 2), name = "AVG Exit Velocity Allowed", align = "center"),
+                predicted_ev = colDef(format = colFormat(digits = 2), name = "Predicted Exit Velocity", align = "center"),
+                evoe = colDef(format = colFormat(digits = 2), name = "EVOE", align = "center",
+                                style = function(value) {
+                                  normalized <- (value - min(evoe_pitchers_2$evoe)) / (max(evoe_pitchers_2$evoe) - min(evoe_pitchers_2$evoe))
+                                  color <- hulk(normalized)
+                                  list(background = color)
+                                }),
+                pitcher_name = colDef(name = "Pitcher", align = "center"),
+                game_year = colDef(name = "Season", align = "center"),
+                bbe = colDef(name = "BBE", align = "center"),
+                pitching_team = colDef(name = "Team", align = "center")
+              ))
+  })
+  
+  output$hit_type_table <- renderReactable({
+    
+    evoe_batters_3 <- evoe_df %>% 
+      group_by(batter_name, team, game_year, pitch_type, pitch_name) %>% 
+      summarise(ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe_1 = mean(evoe), bbe = n(), max_evoe = max(evoe)) %>% 
+      filter(bbe >= input$bbe3) %>% 
+      select(batter_name, team, game_year, pitch_type, pitch_name, bbe, ev, predicted_ev, evoe_1, max_evoe) %>% 
+      arrange(desc(evoe_1))
+    
+    
+    hulk <- function(x) rgb(colorRamp(c("#7fb7d7", "#ffffbf", "#fc8d59"))(x), maxColorValue = 255)
+  
+    
+    reactable(evoe_batters_3, filterable = TRUE, searchable = TRUE, showPageSizeOptions = TRUE, pageSizeOptions = c(10, 25, 50, 100),
+              defaultPageSize = 10,
+              columns = list(
+                ev = colDef(format = colFormat(digits = 2), name = "AVG Exit Velocity", align = "center"),
+                predicted_ev = colDef(format = colFormat(digits = 2), name = "Predicted Exit Velocity", align = "center"),
+                evoe_1 = colDef(format = colFormat(digits = 2), name = "EVOE", align = "center",
+                                style = function(value) {
+                                  normalized <- (value - min(evoe_batters_3$evoe_1)) / (max(evoe_batters_3$evoe_1) - min(evoe_batters_3$evoe_1))
+                                  color <- hulk(normalized)
+                                  list(background = color)
+                                }),
+                batter_name = colDef(name = "Batter", align = "center"),
+                pitch_type = colDef(name = "Pitch Type", align = "center"),
+                pitch_name = colDef(name = "Pitch Name", align = "center"),
+                game_year = colDef(name = "Season", align = "center"),
+                bbe = colDef(name = "BBE", align = "center"),
+                team = colDef(name = "Team", align = "center"),
+                max_evoe = colDef(format = colFormat(digits = 2), name = "Max EVOE", align = "center",
+                                  style = function(value) {
+                                    normalized <- (value - min(evoe_batters_3$max_evoe)) / (max(evoe_batters_3$max_evoe) - min(evoe_batters_3$max_evoe))
+                                    color <- hulk(normalized)
+                                    list(background = color)
+                                  })
+              ))
+    
+  })
+  
+  output$pitch_type_table <- renderReactable({ 
+    
+    evoe_pitchers_2 <- evoe_df %>% 
+      group_by(pitcher_name, pitching_team, game_year, pitch_type, pitch_name) %>% 
+      summarise(bbe = n(), ev = mean(launch_speed), predicted_ev = mean(predicted_ev),  evoe = mean(evoe)) %>% 
+      filter(bbe >= input$bbe4) %>% 
+      arrange(-desc(evoe))
+    
+    hulk <- function(x) rgb(colorRamp(c("#fc8d59", "#ffffbf", "#7fb7d7"))(x), maxColorValue = 255)
+    
+    
+    reactable(evoe_pitchers_2, filterable = TRUE, searchable = TRUE, showPageSizeOptions = TRUE, pageSizeOptions = c(10, 25, 50, 100),
+              defaultPageSize = 10,
+              columns = list(
+                ev = colDef(format = colFormat(digits = 2), name = "AVG Exit Velocity Allowed", align = "center"),
+                predicted_ev = colDef(format = colFormat(digits = 2), name = "Predicted Exit Velocity", align = "center"),
+                evoe = colDef(format = colFormat(digits = 2), name = "EVOE", align = "center",
+                              style = function(value) {
+                                normalized <- (value - min(evoe_pitchers_2$evoe)) / (max(evoe_pitchers_2$evoe) - min(evoe_pitchers_2$evoe))
+                                color <- hulk(normalized)
+                                list(background = color)
+                              }),
+                pitcher_name = colDef(name = "Pitcher", align = "center"),
+                pitch_type = colDef(name = "Pitch Type", align = "center"),
+                pitch_name = colDef(name = "Pitch Name", align = "center"),
+                game_year = colDef(name = "Season", align = "center"),
+                bbe = colDef(name = "BBE", align = "center"),
+                pitching_team = colDef(name = "Team", align = "center")
+              ))
+    
+    })
+  
+  output$sz_graph <- renderPlot({
+    
+    name <- input$hitter4
+    
+    pitch_types <- case_when(
+      input$pitch == "All Pitches" ~ "All Pitches",
+      input$pitch == "Fastballs" ~ "fastball",
+      input$pitch == "Breaking Balls" ~ "breaking ball",
+      input$pitch == "Offspeed" ~ "offspeed",
+      input$pitch == "Other" ~ "other"
+    )
+    
+    
+    
+    if(pitch_types != "All Pitches") {
+      
+      sz_plot <- evoe_df %>% 
+        filter(batter_name == name, pitch_group %in% pitch_types,
+               game_year >= input$years[1] & game_year <= input$years[2])      
+      
+    }
+    
+    else {
+      
+      sz_plot <- evoe_df %>% 
+        filter(batter_name == name,
+               game_year >= input$years[1] & game_year <= input$years[2])
+      
+    }
+    
+
+    
+    x <- c(-.95,.95,.95,-.95,-.95)
+    z <- c(1.6,1.6,3.5,3.5,1.6)
+    
+    sz <- data.frame(x,z)
+    
+    if(pitch_types == "fastball" | pitch_types == "breaking ball") {
+      
+      ggplot() +
+        xlim(-2, 2) +
+        theme_shotquality() +
+        stat_summary_2d(data = sz_plot, aes(x = plate_x, y = plate_z, z = evoe), bins = 10) +
+        geom_path(data = sz, aes(x = x, y = z), alpha = 0.6) +
+        scale_fill_continuous(low = "purple", high = "green") +
+        labs(
+          x = "Horizontal Pitch Location",
+          y = "Feet From Ground",
+          caption = "@ajaypatell8",
+          fill = "EVOE"
+        ) +
+        ggtitle(paste(name, "'s EVOE Strike Zone Chart Against ", str_to_title(pitch_types), "s", sep = "")) +
+        theme(
+          legend.box.background = element_rect("white"),
+          plot.title = element_text(color = "black"),
+          legend.position = "right",
+          axis.title.x =  element_text(color = 'black'),
+          axis.title.y = element_text(color = "black"),
+          plot.caption = element_text(color = "black")
+        )
+      
+    }
+    
+    else{
+      
+      ggplot() +
+        xlim(-2, 2) +
+        theme_shotquality() +
+        stat_summary_2d(data = sz_plot, aes(x = plate_x, y = plate_z, z = evoe), bins = 10) +
+        geom_path(data = sz, aes(x = x, y = z), alpha = 0.6) +
+        scale_fill_continuous(low = "purple", high = "green") +
+        labs(
+          x = "Horizontal Pitch Location",
+          y = "Feet From Ground",
+          caption = "@ajaypatell8",
+          fill = "EVOE"
+        ) +
+        ggtitle(paste(name, "'s EVOE Strike Zone Chart Against ", str_to_title(pitch_types), sep = "")) +
+        theme(
+          legend.box.background = element_rect("white"),
+          plot.title = element_text(color = "black"),
+          legend.position = "right",
+          axis.title.x =  element_text(color = 'black'),
+          axis.title.y = element_text(color = "black"),
+          plot.caption = element_text(color = "black")
+        )
+      
+    }
+    
+    
+  })
+  
+  output$sz_graph_pitch <- renderPlot({
+    
+    name1 <- input$pitcher4
+    
+    pitch_types1 <- case_when(
+      input$pitch1 == "All Pitches" ~ "All Pitches",
+      input$pitch1 == "Fastballs" ~ "fastball",
+      input$pitch1 == "Breaking Balls" ~ "breaking ball",
+      input$pitch1 == "Offspeed" ~ "offspeed",
+      input$pitch1 == "Other" ~ "other"
+    )
+    
+    
+    
+    if(pitch_types1 != "All Pitches") {
+      
+      sz_plot <- evoe_df %>% 
+        filter(pitcher_name == name1, pitch_group %in% pitch_types1,
+               game_year >= input$years1[1] & game_year <= input$years1[2])      
+      
+    }
+    
+    else {
+      
+      sz_plot <- evoe_df %>% 
+        filter(pitcher_name == name1,
+               game_year >= input$years1[1] & game_year <= input$years1[2])
+      
+    }
+    
+    
+    
+    x <- c(-.95,.95,.95,-.95,-.95)
+    z <- c(1.6,1.6,3.5,3.5,1.6)
+    
+    sz <- data.frame(x,z)
+    
+    if(pitch_types1 == "fastball" | pitch_types1 == "breaking ball") {
+      
+      ggplot() +
+        xlim(-2, 2) +
+        theme_shotquality() +
+        stat_summary_2d(data = sz_plot, aes(x = plate_x, y = plate_z, z = evoe), bins = 10) +
+        geom_path(data = sz, aes(x = x, y = z), alpha = 0.6) +
+        scale_fill_continuous(low = "green", high = "purple") +
+        labs(
+          x = "Horizontal Pitch Location",
+          y = "Feet From Ground",
+          caption = "@ajaypatell8",
+          fill = "EVOE"
+        ) +
+        ggtitle(paste(name1, "'s EVOE Strike Zone Chart Of ", str_to_title(pitch_types1), "s", sep = "")) +
+        theme(
+          legend.box.background = element_rect("white"),
+          plot.title = element_text(color = "black"),
+          legend.position = "right",
+          axis.title.x =  element_text(color = 'black'),
+          axis.title.y = element_text(color = "black"),
+          plot.caption = element_text(color = "black")
+        )
+      
+    }
+    
+    else{
+      
+      ggplot() +
+        xlim(-2, 2) +
+        theme_shotquality() +
+        stat_summary_2d(data = sz_plot, aes(x = plate_x, y = plate_z, z = evoe), bins = 10) +
+        geom_path(data = sz, aes(x = x, y = z), alpha = 0.6) +
+        scale_fill_continuous(low = "green", high = "purple") +
+        labs(
+          x = "Horizontal Pitch Location",
+          y = "Feet From Ground",
+          caption = "@ajaypatell8",
+          fill = "EVOE"
+        ) +
+        ggtitle(paste(name1, "'s EVOE Strike Zone Chart Of ", str_to_title(pitch_types1), sep = "")) +
+        theme(
+          legend.box.background = element_rect("white"),
+          plot.title = element_text(color = "black"),
+          legend.position = "right",
+          axis.title.x =  element_text(color = 'black'),
+          axis.title.y = element_text(color = "black"),
+          plot.caption = element_text(color = "black")
+        )
+      
+    }
+    
+    
+  })
+  
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
